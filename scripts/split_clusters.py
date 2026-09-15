@@ -37,18 +37,18 @@ def get_cluster_genotype(cluster_sequences):
 
 def create_safe_filename(cluster_id, genotype, max_length=100):
     """Create a safe filename with length limit"""
-    base_name = f"cluster_{cluster_id}_{genotype}"
+    base_name = f"cluster__{cluster_id}__{genotype}"
     if len(base_name) <= max_length:
         return f"{base_name}.fasta"
     else:
         # 如果太长，截断基因型部分
-        available_length = max_length - len(f"cluster_{cluster_id}_") - len(".fasta")
+        available_length = max_length - len(f"cluster__{cluster_id}__") - len(".fasta")
         if available_length > 0:
             truncated_genotype = genotype[:available_length]
-            return f"cluster_{cluster_id}_{truncated_genotype}.fasta"
+            return f"cluster__{cluster_id}__{truncated_genotype}.fasta"
         else:
             # 如果还是太长，使用最简单的命名
-            return f"cluster_{cluster_id}.fasta"
+            return f"cluster__{cluster_id}.fasta"
 
 def split_clusters(cluster_info_file, sequences_file, outdir):
     """
@@ -79,8 +79,15 @@ def split_clusters(cluster_info_file, sequences_file, outdir):
     # Create FASTA file for each cluster
     cluster_files = []
     for cluster_id, seq_ids in cluster_groups.items():
-        # Get genotype information for this cluster
-        genotype = get_cluster_genotype(seq_ids)
+        # Get genotype information for this cluster. Newer genotype-pair clustering
+        # writes this explicitly; older vclust-based tables fall back to ID parsing.
+        if "genotype_pair" in df.columns:
+            genotype_values = sorted(
+                value for value in df.loc[df["cluster_id"] == cluster_id, "genotype_pair"].dropna().unique()
+            )
+            genotype = genotype_values[0] if len(genotype_values) == 1 else "_".join(genotype_values)
+        else:
+            genotype = get_cluster_genotype(seq_ids)
         
         # Create filename with genotype information
         filename = create_safe_filename(cluster_id, genotype)
@@ -105,4 +112,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    split_clusters(args.cluster_info, args.sequences, args.outdir) 
+    split_clusters(args.cluster_info, args.sequences, args.outdir)

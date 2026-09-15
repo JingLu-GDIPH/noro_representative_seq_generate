@@ -16,7 +16,7 @@
 
 #### 2.1.2 多序列比对工具
 
-**MAFFT**（Multiple Alignment using Fast Fourier Transform）是一种高效的多序列比对软件。本研究采用L-INS-i算法进行比对，该算法结合了局部比对和迭代优化策略，特别适用于具有可比对保守区域的序列集合。比对过程设置最大迭代次数为1000次，以确保比对结果的准确性。
+**MAFFT**（Multiple Alignment using Fast Fourier Transform）是一种高效的多序列比对软件。本流水线对每个多序列 cluster 去除既有 gap 后重新执行 MAFFT `--auto` 比对，避免将下载序列中已有的 padding 误认为同源位点比对结果。比对后删除所有 A/C/G/T 覆盖度低于 50% 的 alignment column；N 和 gap 不计为有效覆盖，因此低覆盖内部插入列和端部低覆盖列都会被屏蔽。
 
 #### 2.1.3 系统发育分析工具
 
@@ -34,7 +34,7 @@
 
 ### 2.2 分析流程
 
-本流水线包含八个主要处理步骤，各步骤之间通过数据流自动连接。
+本流水线包含九个主要处理步骤，各步骤之间通过数据流自动连接。
 
 #### 2.2.1 步骤一：序列质量过滤
 
@@ -52,13 +52,16 @@ $$Quality\ Score = \frac{N_{count} + Gap_{count}}{L_{sequence}} \times 100\%$$
 
 **目的**：将遗传相似性较高的序列归入同一聚类，为后续分组分析奠定基础。
 
-**方法**：采用基于ANI的层次聚类方法。首先计算所有序列对之间的ANI值，ANI定义为两条序列之间相同核苷酸位点占可比对位点总数的比例。随后采用完全连锁法（Complete Linkage）进行层次聚类，该方法以聚类间最大距离作为聚类间距离度量，确保同一聚类内任意两条序列的相似性均不低于设定阈值。
+**方法**：采用基于ANI的层次聚类方法。首先计算所有序列对之间的ANI值，ANI定义为两条序列之间相同核苷酸位点占可比对位点总数的比例。随后仅保留 VP1 genotype 相同的序列对（如 GI.3-GI.3、GII.4-GII.4、GIX.1-GIX.1），去除跨 genotype 或无法解析 genotype 的配对。最后采用完全连锁法（Complete Linkage）进行层次聚类，该方法以聚类间最大距离作为聚类间距离度量，降低链式聚类导致的跨型别合并风险。
 
 **参数设置**：
 - ANI聚类阈值：0.90（90%）
+- query coverage阈值：0.65
+- reference coverage阈值：0.65
+- 序列长度比例阈值：0.65
 - 聚类算法：完全连锁法
 
-**生物学意义**：90%的ANI阈值能够有效区分病毒的不同进化分支，将亲缘关系较近的序列归为同一组，同时保持不同变异株之间的区分度。
+**生物学意义**：90%的ANI阈值能够在不同长度基因组片段之间保持适度容忍度；qcov、rcov和长度比例阈值用于避免短局部高相似区域导致错误合并；VP1 genotype 硬分层用于防止不同衣壳型别在低覆盖局部比对下被并入同一 cluster。
 
 #### 2.2.3 步骤三：聚类分割
 
@@ -66,18 +69,24 @@ $$Quality\ Score = \frac{N_{count} + Gap_{count}}{L_{sequence}} \times 100\%$$
 
 **方法**：根据聚类分析结果，将属于同一聚类的序列提取并保存为独立的FASTA文件。同时从序列标识符中提取基因型信息用于文件命名，便于结果追溯和管理。
 
-#### 2.2.4 步骤四：多序列比对
+#### 2.2.4 步骤四：序列方向统一
+
+**目的**：在多序列比对前，将同一聚类内所有序列统一到同一条链方向，避免反向互补链存储的序列被强行比对到错误方向，产生大量 gap 和错误的相似性。
+
+**方法**：公共数据库下载的序列并非都以正义链存储（例如 `GII.P31_GII.4_KX158285_2015`、`GII.P7_GII.6_KX158282_2015` 等以负链形式下载）。对每个聚类，选取 A/C/G/T 有效碱基数最多的序列作为方向参考，对其余每条序列分别计算与参考在正义链和反向互补链上的 15-mer 重叠数；当反向互补链重叠显著高于正义链且达到最低重叠阈值时，将该序列反向互补后再用于比对。仅含单条序列的聚类无需处理。该步骤仅改变链方向，不改变正向存储序列的内容。
+
+#### 2.2.5 步骤五：多序列比对
 
 **目的**：对每个聚类内的序列进行多序列比对，为系统发育分析提供输入数据。
 
-**方法**：使用MAFFT软件的L-INS-i算法进行多序列比对。该算法首先进行全局成对比对，然后通过迭代优化逐步改进比对结果。对于仅含单条序列的聚类，直接保留原序列，无需进行比对操作。
+**方法**：对于多序列聚类，先移除输入序列中已有 gap，再使用 MAFFT `--auto` 进行多序列比对。对于仅含单条序列的聚类，直接保留原序列，无需进行比对操作。比对完成后，对所有 alignment column 进行覆盖度过滤：若该列中 A/C/G/T 的覆盖比例低于 50%，则删除该列；N 和 gap 不作为有效覆盖，内部低覆盖插入列不进入后续建树和 consensus。
 
 **算法特点**：
-- 采用局部比对策略识别保守区域
-- 迭代优化次数设为1000次，确保比对精度
-- 自动选择最佳比对策略以适应不同特征的序列集
+- 对每个多序列 cluster 进行真实 MAFFT 重比对
+- 通过 `--auto` 自动选择适合该 cluster 的比对策略
+- 对全 alignment 低覆盖列进行过滤，降低内部插入列导致的人工拉长 consensus 风险
 
-#### 2.2.5 步骤五：共识序列生成
+#### 2.2.6 步骤六：共识序列生成
 
 **目的**：基于系统发育分析生成代表性共识序列。
 
@@ -116,7 +125,7 @@ $$Similarity(\%) = \frac{M}{N_{valid}} \times 100$$
 
 其中，$M$为两条序列在相同位置具有相同核苷酸（均非gap）的位点数，$N_{valid}$为两条序列在相同位置均不是gap的位点总数。
 
-#### 2.2.6 步骤六：增强共识序列验证
+#### 2.2.7 步骤七：增强共识序列验证
 
 **目的**：通过迭代验证确保最终输出的共识序列满足多样性要求。
 
@@ -137,13 +146,13 @@ $$Similarity(\%) = \frac{M}{N_{valid}} \times 100$$
 - 条件一：所有序列对的相似性均 ≤ 95%
 - 条件二：迭代次数达到上限（10次）
 
-#### 2.2.7 步骤七：结果收集
+#### 2.2.8 步骤八：结果收集
 
 **目的**：合并所有聚类产生的最终共识序列。
 
 **方法**：将各聚类经过验证的最终共识序列合并为单一FASTA文件，同时生成流水线运行摘要报告，包括处理的序列数量、生成的共识序列数量等统计信息。
 
-#### 2.2.8 步骤八：最终质量验证
+#### 2.2.9 步骤九：最终质量验证
 
 **目的**：对合并后的完整结果进行最终质量检验。
 
@@ -157,7 +166,10 @@ $$Similarity(\%) = \frac{M}{N_{valid}} \times 100$$
 |----------|--------|------------|
 | 序列质量阈值 | 10% | 控制输入数据质量，移除含有过多未知碱基或缺口的低质量序列 |
 | ANI聚类阈值 | 90% | 区分不同进化分支的边界，同一聚类内的序列应具有较高的遗传相似性 |
+| query/reference coverage阈值 | 65% / 65% | 避免短局部高相似比对导致跨型别或远缘序列错误合并 |
+| 序列长度比例阈值 | 65% | 允许5000-6000 bp片段与约7200 bp近完整基因组共同分析，同时排除过短局部重叠 |
 | 聚类算法 | 完全连锁法 | 确保聚类内任意两序列相似性均达到阈值，避免链式聚类问题 |
+| VP1 genotype过滤 | 相同型别内聚类 | 避免不同VP1型别因局部ANI较高被合并为mixed genotype cluster |
 | 相似性阈值 | 95% | 判定序列是否足够相似可合并的边界，同时确保最终结果的多样性 |
 | 后验概率阈值 | 80% | 祖先序列重建的置信度要求，保证重建结果的可靠性 |
 | 最大迭代次数 | 10次 | 防止算法陷入无限循环，实际应用中通常3-5次即可收敛 |
@@ -272,13 +284,13 @@ $$C_{k+1} = f(C_k) \quad \text{当} \quad S_{max}(C_k) > \theta$$
 
 ### 6.2 方法描述示例（中文）
 
-> 本研究采用自主开发的自动化流水线生成病毒代表性共识序列。首先对输入序列进行质量过滤，移除未知碱基和缺口比例超过10%的低质量序列。随后使用vclust软件基于平均核苷酸一致性（ANI≥90%）进行聚类分析，采用完全连锁法确保聚类质量。对各聚类使用MAFFT进行多序列比对，采用L-INS-i算法并设置最大迭代次数为1000次。系统发育树构建和祖先序列重建使用IQ-TREE软件完成，选用Jukes-Cantor核酸替换模型，祖先状态后验概率阈值设为80%。
+> 本研究采用自主开发的自动化流水线生成病毒代表性共识序列。首先对输入序列进行质量过滤，移除未知碱基和缺口比例超过10%的低质量序列。随后按相同RdRp genotype和VP1 genotype对序列进行分组，以避免不同基因型或重组型序列被错误合并。在比对前先统一序列方向：对每个分组以A/C/G/T有效碱基数最多的序列为方向参考，比较其余序列正义链与反向互补链的15-mer重叠，将反向存储的序列反向互补到与参考一致的链上。对各分组移除既有gap后使用MAFFT `--auto` 重新进行多序列比对；比对后删除所有A/C/G/T覆盖度低于50%的列，其中N和gap均不计为有效覆盖，从而去除低覆盖内部插入列和端部低覆盖区域。最终代表序列写出前移除所有由比对引入的gap，避免低覆盖插入列被填入共识序列。系统发育树构建和祖先序列重建使用IQ-TREE软件完成，选用Jukes-Cantor核酸替换模型，祖先状态后验概率阈值设为80%。
 >
 > 共识序列的选择基于系统发育树节点分析策略：对中点定根后的系统发育树遍历所有节点，计算各节点内部序列的最低成对相似性，选择满足以下条件的节点——节点内部最低相似性≥95%且父节点内部最低相似性<95%——作为最优节点，输出其祖先序列作为该分支的代表。通过迭代验证确保最终所有共识序列之间的相似性均不超过95%。
 
 ### 6.3 方法描述示例（英文）
 
-> Representative consensus sequences were generated using an automated bioinformatics pipeline. Input sequences were first filtered to remove low-quality sequences with more than 10% ambiguous bases and gaps combined. Sequence clustering was performed using vclust based on Average Nucleotide Identity (ANI ≥ 90%) with complete linkage algorithm. Multiple sequence alignment was conducted using MAFFT with the L-INS-i algorithm and a maximum of 1000 iterations. Phylogenetic tree construction and ancestral sequence reconstruction were performed using IQ-TREE with the Jukes-Cantor nucleotide substitution model and a posterior probability threshold of 80% for ancestral state assignment.
+> Representative consensus sequences were generated using an automated bioinformatics pipeline. Input sequences were first filtered to remove low-quality sequences with more than 10% ambiguous bases and gaps combined. Sequences were grouped by matched RdRp and VP1 genotypes to avoid erroneous merging of distinct genotypes or recombinant lineages. Within each group, sequences were oriented to a single strand before alignment: every record was compared, by 15-mer overlap in the forward versus reverse-complement direction, against the group's longest A/C/G/T sequence, and any record stored on the opposite strand was reverse-complemented. For each multi-sequence group, pre-existing gaps were removed and sequences were realigned using MAFFT `--auto`; all alignment columns with <50% A/C/G/T coverage were removed, with both `N` and gap characters excluded from valid coverage. This masks low-occupancy internal insertion columns as well as low-coverage terminal regions. Before final representative sequences were written, all alignment-induced gaps were removed to prevent low-coverage insertion columns from being incorporated into consensus sequences. Phylogenetic tree construction and ancestral sequence reconstruction were performed using IQ-TREE with the Jukes-Cantor nucleotide substitution model and a posterior probability threshold of 80% for ancestral state assignment.
 >
 > Consensus sequence selection was based on a phylogenetic node analysis strategy. After midpoint rooting, all nodes in the phylogenetic tree were traversed to calculate the minimum pairwise similarity among descendant sequences. Optimal nodes were selected based on two criteria: (1) minimum internal similarity ≥ 95%, and (2) parent node minimum internal similarity < 95%. Ancestral sequences of optimal internal nodes were output as representative consensus sequences for each branch. Iterative validation ensured that all final consensus sequences had pairwise similarities not exceeding 95%.
 

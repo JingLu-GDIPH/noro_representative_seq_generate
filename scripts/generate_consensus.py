@@ -26,9 +26,35 @@ import numpy as np
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+VALID_BASES = set("ACGT")
+VALID_BASE_BYTES = np.frombuffer(b"ACGT", dtype=np.uint8)
+RDRP_GENOTYPE_PATTERN = re.compile(r"^G(?:I|II|IX)\.P[A-Za-z0-9]+$")
+VP1_GENOTYPE_PATTERN = re.compile(r"^G(?:I|II|IX)\.[A-Za-z0-9]+$")
+GENOTYPE_PAIR_PATTERN = re.compile(
+    r"(G(?:I|II|IX)\.P[A-Za-z0-9]+)_(G(?:I|II|IX)\.[A-Za-z0-9]+)"
+)
+
+
+def extract_genotype_pair_label(text):
+    """Extract a combined RdRp_VP1 genotype label when present."""
+    match = GENOTYPE_PAIR_PATTERN.search(str(text))
+    if match:
+        return f"{match.group(1)}_{match.group(2)}"
+    return None
+
+
+def extract_genotype_pair_from_id(sequence_id):
+    """Extract RdRp_VP1 from the first two FASTA ID fields."""
+    parts = str(sequence_id).split("_")
+    if len(parts) >= 2 and RDRP_GENOTYPE_PATTERN.match(parts[0]) and VP1_GENOTYPE_PATTERN.match(parts[1]):
+        return f"{parts[0]}_{parts[1]}"
+    return extract_genotype_pair_label(sequence_id)
+
 def calculate_sequence_similarity(seq1, seq2):
     """
-    计算两条序列的相似性（基于相同位置的相同碱基）
+    计算两条序列的相似性。
+
+    只有当两个位置都为 A/C/G/T 时才计入分母；N 和 gap 均不作为有效覆盖。
     
     Args:
         seq1, seq2 (str): 两条序列
@@ -42,9 +68,14 @@ def calculate_sequence_similarity(seq1, seq2):
     if len(seq1) == 0:
         return 0.0
     
-    # 计算相同位置的相同碱基数量
-    matches = sum(1 for a, b in zip(seq1, seq2) if a == b and a != '-' and b != '-')
-    total_positions = sum(1 for a, b in zip(seq1, seq2) if a != '-' and b != '-')
+    matches = 0
+    total_positions = 0
+    for a, b in zip(seq1.upper(), seq2.upper()):
+        if a not in VALID_BASES or b not in VALID_BASES:
+            continue
+        total_positions += 1
+        if a == b:
+            matches += 1
     
     if total_positions == 0:
         return 0.0
@@ -73,10 +104,9 @@ def calculate_node_similarity(sequences):
         return 0.0
 
     encoded = np.frombuffer(
-        "".join(sequences).encode("ascii"),
+        "".join(sequence.upper() for sequence in sequences).encode("ascii"),
         dtype=np.uint8
     ).reshape(len(sequences), seq_length)
-    gap = ord("-")
     min_similarity = 100.0
     valid_pairs = 0
 
@@ -84,7 +114,7 @@ def calculate_node_similarity(sequences):
     for i in range(len(sequences) - 1):
         reference = encoded[i]
         comparisons = encoded[i + 1:]
-        valid = (comparisons != gap) & (reference != gap)
+        valid = np.isin(comparisons, VALID_BASE_BYTES) & np.isin(reference, VALID_BASE_BYTES)
         totals = valid.sum(axis=1)
         matches = ((comparisons == reference) & valid).sum(axis=1)
         nonzero = totals > 0
@@ -418,10 +448,14 @@ def extract_common_genotype_from_cluster(aligned_file):
     genotypes = set()
     
     try:
+        filename_genotype = extract_genotype_pair_label(os.path.basename(aligned_file))
+        if filename_genotype:
+            return filename_genotype
+
         for record in SeqIO.parse(aligned_file, "fasta"):
-            # 从序列ID中提取基因型（第一个下划线前的部分）
-            genotype = record.id.split('_')[0]
-            genotypes.add(genotype)
+            genotype = extract_genotype_pair_from_id(record.id)
+            if genotype:
+                genotypes.add(genotype)
     except Exception as e:
         logging.error(f"解析序列基因型失败: {str(e)}")
         return "unknown"
@@ -650,9 +684,11 @@ def generate_simple_consensus_from_sequences(sequences):
     seq_length = len(sequences[0])
     
     for pos in range(seq_length):
-        bases = [seq[pos] for seq in sequences if pos < len(seq)]
-        # 过滤掉gap
-        bases = [b for b in bases if b != '-']
+        bases = [
+            seq[pos].upper()
+            for seq in sequences
+            if pos < len(seq) and seq[pos].upper() in VALID_BASES
+        ]
         
         if not bases:
             consensus.append('-')
@@ -715,8 +751,9 @@ def generate_simple_consensus(aligned_file, consensus_file, genotype, cluster_id
             return
     else:
         # 其他情况使用原来的方法
-        summary = AlignInfo.SummaryInfo(alignment)
-        selected_sequence = str(summary.dumb_consensus(threshold=0.7, ambiguous="N"))
+        selected_sequence = generate_simple_consensus_from_sequences(
+            [str(record.seq) for record in alignment]
+        )
         consensus_id = f"{common_genotype}_cluster_{cluster_number}_node_1"
         
         with open(consensus_file, "w") as f:
@@ -818,16 +855,14 @@ def get_node_genotypes(tree, node, ancestral_sequences, tip_sequences):
     # 如果是末端节点，直接从节点名称获取基因型
     if node.is_terminal():
         if node.name in tip_sequences:
-            # 从序列ID中提取基因型（第一个下划线前的部分）
-            genotype = node.name.split('_')[0]
+            genotype = extract_genotype_pair_from_id(node.name) or node.name.split('_')[0]
             genotypes[genotype] = 1
         return genotypes
     
     # 统计所有后代序列的基因型
     for desc in node.get_terminals():
         if desc.name in tip_sequences:
-            # 从序列ID中提取基因型（第一个下划线前的部分）
-            genotype = desc.name.split('_')[0]
+            genotype = extract_genotype_pair_from_id(desc.name) or desc.name.split('_')[0]
             genotypes[genotype] = genotypes.get(genotype, 0) + 1
     
     return genotypes

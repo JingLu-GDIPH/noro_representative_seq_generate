@@ -10,7 +10,7 @@ from Bio import SeqIO
 
 
 def pairwise_similarity(seq1, seq2):
-    """Match the similarity definition used by final validation."""
+    """Similarity over columns where both sequences are non-gap."""
     if len(seq1) != len(seq2):
         raise ValueError("Aligned sequences must have equal lengths")
 
@@ -20,7 +20,7 @@ def pairwise_similarity(seq1, seq2):
     )
     total = sum(
         1 for base1, base2 in zip(seq1, seq2)
-        if base1 != "-" or base2 != "-"
+        if base1 != "-" and base2 != "-"
     )
     return (matches / total) * 100 if total else 0.0
 
@@ -50,7 +50,7 @@ def align_records(records, threads=1):
 
         with open(output_path, "w") as output_handle:
             result = subprocess.run(
-                ["mafft", "--auto", "--thread", str(threads), input_path],
+                ["mafft", "--quiet", "--auto", "--thread", str(threads), input_path],
                 stdout=output_handle,
                 stderr=subprocess.PIPE,
                 text=True,

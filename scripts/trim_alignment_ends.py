@@ -43,26 +43,42 @@ def trim_alignment_ends(input_fasta, output_fasta, min_coverage=0.5):
             f"No alignment column reaches {min_coverage:.1%} A/C/G/T coverage"
         )
 
-    start = retained[0]
-    end = retained[-1] + 1
     for record in records:
-        record.seq = Seq(str(record.seq[start:end]))
+        sequence = str(record.seq)
+        record.seq = Seq("".join(sequence[column] for column in retained))
 
     with open(output_fasta, "w") as output_handle:
         SeqIO.write(records, output_handle, "fasta")
+
+    retained_set = set(retained)
+    left_trimmed = 0
+    while left_trimmed < alignment_length and left_trimmed not in retained_set:
+        left_trimmed += 1
+
+    right_trimmed = 0
+    while (
+        right_trimmed < alignment_length
+        and alignment_length - right_trimmed - 1 not in retained_set
+    ):
+        right_trimmed += 1
+
     return {
         "sequence_count": len(records),
         "original_length": alignment_length,
-        "trimmed_length": end - start,
-        "left_trimmed": start,
-        "right_trimmed": alignment_length - end,
+        "trimmed_length": len(retained),
+        "removed_columns": alignment_length - len(retained),
+        "left_trimmed": left_trimmed,
+        "right_trimmed": right_trimmed,
+        "internal_removed_columns": (
+            alignment_length - len(retained) - left_trimmed - right_trimmed
+        ),
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Trim low-coverage columns from both ends of a FASTA alignment. "
+            "Remove low-coverage columns from a FASTA alignment. "
             "Only A/C/G/T count as covered; N and gaps do not."
         )
     )
@@ -72,7 +88,7 @@ def main():
         "--min-coverage",
         type=float,
         default=0.5,
-        help="Minimum A/C/G/T sequence coverage retained at each edge (default: 0.5)",
+        help="Minimum A/C/G/T sequence coverage retained for each column (default: 0.5)",
     )
     args = parser.parse_args()
 
@@ -80,11 +96,12 @@ def main():
         Path(args.input), Path(args.output), args.min_coverage
     )
     print(
-        "End trimming completed: "
+        "Alignment column filtering completed: "
         f"{stats['sequence_count']} sequences, "
         f"{stats['original_length']} -> {stats['trimmed_length']} columns, "
         f"left removed {stats['left_trimmed']}, "
-        f"right removed {stats['right_trimmed']}"
+        f"right removed {stats['right_trimmed']}, "
+        f"internal removed {stats['internal_removed_columns']}"
     )
 
 

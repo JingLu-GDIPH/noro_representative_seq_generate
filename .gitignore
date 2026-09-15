@@ -21,3 +21,13 @@ ncbi_download_*/
 .idea/
 .vscode/
 *.swp
+
+# Large data & results (regenerated, not tracked)
+Rawdata/
+result_4ref/
+results_4probe/
+v2_test/
+.zcode/
+*.docx
+*.pdf
+nohup.out

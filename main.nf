@@ -1,12 +1,12 @@
 #!/usr/bin/env nextflow
 
 /*
- * Enhanced Norovirus GII Consensus Sequence Pipeline
+ * Enhanced Norovirus GI/GII Consensus Sequence Pipeline
  * 
  * IMPORTANT: This pipeline is configured to run all processes in the noro-consensus environment.
  * The conda environment is automatically activated via nextflow.config.
  *
- * This workflow extends the main.nf pipeline by adding iterative consensus validation.
+ * This workflow adds iterative tree-guided consensus validation.
  * After Process 5 (consensus generation), it validates that each consensus file has
  * internal pairwise similarity below 95%. If not, it repeats the consensus process
  * until the threshold is met.
@@ -14,7 +14,7 @@
  * Environment Setup:
  * 1. Create environment: conda env create -f environment.yml
  * 2. Activate environment: conda activate noro-consensus
- * 3. Run pipeline: nextflow run main_consensus_new.nf --input_file <file> --output_dir <dir>
+ * 3. Run pipeline: nextflow run main.nf --input_file <file> --output_dir <dir>
  * 
  * Note: The conda environment is automatically activated for all processes via the config.
  */
@@ -26,12 +26,15 @@ params.output_dir = null
 
 // Optional parameters with default values
 params.ani_threshold = 0.9
+params.query_coverage_threshold = 0.65
+params.reference_coverage_threshold = 0.65
+params.length_ratio_threshold = 0.65
 params.cluster_algorithm = "complete"
 params.similarity_threshold = 95.0
 params.max_iterations = 10  // 最大迭代次数
 params.internal_similarity_threshold = 95.0  // 内部相似性阈值
-params.alignment_end_min_coverage = 0.5  // 比对两端A/C/G/T最低覆盖率
-params.threads = 10
+params.alignment_end_min_coverage = 0.5  // MAFFT后全列A/C/G/T最低覆盖率；N和gap不计有效覆盖
+def pipeline_threads = (params.threads ?: 8) as int
 
 // ==================== PARAMETER VALIDATION ====================
 if (!params.input_file) {
@@ -47,20 +50,27 @@ if (!file(params.input_file).exists()) {
     error "ERROR: Input file '${params.input_file}' does not exist."
 }
 
+if (pipeline_threads < 1) {
+    error "ERROR: --threads must be a positive integer."
+}
+
 // ==================== LOG INFO ====================
 log.info """\
-         ENHANCED NOROVIRUS GII CONSENSUS PIPELINE
+         ENHANCED NOROVIRUS GI/GII CONSENSUS PIPELINE
          ==========================================
          Input File                    : ${params.input_file}
          Output Directory              : ${params.output_dir}
          ANI Threshold                 : ${params.ani_threshold}
+         Query Coverage Threshold      : ${params.query_coverage_threshold}
+         Reference Coverage Threshold  : ${params.reference_coverage_threshold}
+         Length Ratio Threshold        : ${params.length_ratio_threshold}
          Cluster Algorithm             : ${params.cluster_algorithm}
-         Threads                       : ${params.threads}
+         Threads                       : ${pipeline_threads}
          Similarity Threshold          : ${params.similarity_threshold}
          Internal Similarity Threshold : ${params.internal_similarity_threshold}
-         Alignment End Min Coverage    : ${params.alignment_end_min_coverage}
+         Alignment Column Min Coverage : ${params.alignment_end_min_coverage}
          Max Iterations                : ${params.max_iterations}
-         Enhanced Features             : Iterative consensus validation
+         Enhanced Features             : RdRp+VP1 genotype grouping, pre-alignment strand orientation normalization, iterative consensus validation
          """
 
 // ==================== Input Channel ====================
@@ -95,9 +105,9 @@ process MERGE_FASTA {
     """
 }
 
-// ==================== PROCESS 2: Clustering with vcluster ====================
+// ==================== PROCESS 2: Group by RdRp and VP1 Genotype ====================
 process CLUSTER {
-    tag "vcluster Clustering"
+    tag "RdRp+VP1 Genotype Grouping"
     publishDir "${params.output_dir}/02_cluster", mode: 'copy'
 
     input:
@@ -106,29 +116,16 @@ process CLUSTER {
     output:
     path "cluster_info.csv"
     path "clustered_sequences.fasta"
-    path "vcluster_results/*"
+    path "genotype_cluster_report.tsv"
 
     script:
     """
-    mkdir -p vcluster_results
-    
-    echo "步骤1: vcluster预过滤 (使用${task.cpus}线程)..."
-    vclust prefilter -i ${merged_fasta} -o vcluster_results/fltr.txt --threads ${task.cpus}
-    
-    echo "步骤2: 计算成对ANI (使用${task.cpus}线程)..."
-    vclust align -i ${merged_fasta} -o vcluster_results/ani.tsv --filter vcluster_results/fltr.txt --threads ${task.cpus}
-    
-    echo "步骤3: 基于ANI进行聚类..."
-    vclust cluster -i vcluster_results/ani.tsv -o vcluster_results/clusters.tsv \
-        --ids vcluster_results/ani.ids.tsv --metric ani --ani ${params.ani_threshold} \
-        --algorithm ${params.cluster_algorithm}
-    
-    python3 ${workflow.projectDir}/scripts/process_vcluster_results.py \
-        --clusters_file vcluster_results/clusters.tsv \
-        --ids_file vcluster_results/ani.ids.tsv \
-        --aligned_fasta ${merged_fasta} \
-        --cluster_output cluster_info.csv \
-        --sequences_output clustered_sequences.fasta
+    echo "按相同RdRp genotype和VP1 genotype直接分组，避免ANI覆盖度/长度差异造成初始cluster偏差..."
+    python3 ${workflow.projectDir}/scripts/group_sequences_by_rdrp_vp1.py \\
+        --input ${merged_fasta} \\
+        --cluster_info cluster_info.csv \\
+        --sequences_output clustered_sequences.fasta \\
+        --report genotype_cluster_report.tsv
     """
 }
 
@@ -153,7 +150,32 @@ process SPLIT_CLUSTERS {
     """
 }
 
-// ==================== PROCESS 4: Multiple Sequence Alignment ====================
+// ==================== PROCESS 4: Normalize Sequence Orientation ====================
+process ORIENT_SEQUENCES {
+    tag "Orientation Normalization"
+    publishDir "${params.output_dir}/03b_oriented", mode: 'copy'
+
+    input:
+    path cluster_fasta
+
+    output:
+    path "oriented_*.fasta"
+
+    script:
+    """
+    output_name=\$(basename ${cluster_fasta})
+
+    # 公共数据库下载的序列并非都存储在同一条链上；若负链序列被直接送入 MAFFT，
+    # 会被强行对齐到错误方向，产生大量 gap 和错误的相似性（例如 GII.P31_GII.4_KX158285）。
+    # 这里以每个 cluster 内最长序列作为方向参考，对反向存储的序列做反向互补后再比对。
+    # 输出仍命名为 oriented_<原名>，方便排查；后续 CONSENSUS 会去掉 oriented_ 前缀再解析基因型。
+    python3 ${workflow.projectDir}/scripts/normalize_orientation.py \\
+        --input ${cluster_fasta} \\
+        --output oriented_\${output_name}
+    """
+}
+
+// ==================== PROCESS 5: Multiple Sequence Alignment ====================
 process ALIGN {
     tag "MAFFT Alignment"
     publishDir "${params.output_dir}/04_aligned", mode: 'copy', pattern: "aligned_*.fasta"
@@ -181,11 +203,11 @@ process ALIGN {
         python3 -c "from Bio import SeqIO; from Bio.Seq import Seq; records=list(SeqIO.parse('${cluster_fasta}', 'fasta')); [setattr(record, 'seq', Seq(str(record.seq).replace('-', ''))) for record in records]; SeqIO.write(records, 'ungapped_\${output_name}', 'fasta')"
 
         echo "Running MAFFT alignment for \${output_name} (\$seq_count sequences)..."
-        mafft --thread ${task.cpus} --auto ungapped_\${output_name} > pretrim_\${output_name}
+        mafft --quiet --thread ${task.cpus} --auto ungapped_\${output_name} > pretrim_\${output_name}
     fi
 
-    # 仅从比对两端删除A/C/G/T覆盖率低于阈值的连续列。
-    # N和gap不计为有效覆盖，内部低覆盖列保留。
+    # 删除所有A/C/G/T覆盖率低于阈值的列。
+    # N和gap不计为有效覆盖，内部低覆盖插入列不进入建树和consensus。
     python3 ${workflow.projectDir}/scripts/trim_alignment_ends.py \\
         --input pretrim_\${output_name} \\
         --output aligned_\${output_name} \\
@@ -196,7 +218,7 @@ process ALIGN {
     """
 }
 
-// ==================== PROCESS 5: Generate Consensus Sequences (Molecular Phylogeny) ====================
+// ==================== PROCESS 6: Generate Consensus Sequences (Molecular Phylogeny) ====================
 process CONSENSUS {
     tag "Consensus Generation"
     publishDir "${params.output_dir}/05_consensus", mode: 'copy'
@@ -219,14 +241,18 @@ process CONSENSUS {
     sequence_count=\$(grep -c "^>" ${cluster_fasta})
     
     # 从文件名提取基因型和cluster信息
-    # 处理格式: cluster_cluster_0_GI.6.fasta
-    if [[ \$filename =~ cluster_cluster_([0-9]+)_([^.]+)\\.fasta ]]; then
+    # 兼容带 oriented_ 前缀（ORIENT_SEQUENCES 输出）和不带前缀的文件名。
+    # 新格式: cluster__cluster_0001__GII.P16_GII.4.fasta
+    if [[ \$filename =~ cluster__(.+)__([^/]+)[.]fasta ]]; then
+        cluster_id=\${BASH_REMATCH[1]}
+        genotype=\${BASH_REMATCH[2]}
+    elif [[ \$filename =~ cluster_cluster_([0-9]+)_(.+)\\.fasta ]]; then
         cluster_id=\${BASH_REMATCH[1]}
         genotype=\${BASH_REMATCH[2]}
     else
         # 使用sed进行更精确的解析
         cluster_id=\$(echo \$filename | sed -n 's/.*cluster_cluster_\\([0-9]*\\)_.*\\.fasta/\\1/p')
-        genotype=\$(echo \$filename | sed -n 's/.*cluster_cluster_[0-9]*_\\([A-Z0-9.]*\\)\\.fasta/\\1/p')
+        genotype=\$(echo \$filename | sed -n 's/.*cluster_cluster_[0-9]*_\\(.*\\)\\.fasta/\\1/p')
         
         # 如果解析失败，使用默认值
         if [ -z "\$cluster_id" ] || [ "\$cluster_id" = "\$filename" ]; then
@@ -267,7 +293,7 @@ process CONSENSUS {
     """
 }
 
-// ==================== PROCESS 6: Enhanced Consensus Generation with Validation (Molecular Phylogeny) ====================
+// ==================== PROCESS 7: Enhanced Consensus Generation with Validation (Molecular Phylogeny) ====================
 process ENHANCED_CONSENSUS {
     tag "Enhanced Consensus Generation with Validation"
     publishDir "${params.output_dir}/06_enhanced_consensus", mode: 'copy'
@@ -280,7 +306,7 @@ process ENHANCED_CONSENSUS {
 
     script:
     """
-    echo "Enhanced consensus logic revision: 2026-06-12-redundancy-pruning-v5"
+    echo "Enhanced consensus logic revision: 2026-06-15-genotype-pair-tree-iteration-merge-v2"
 
     # 获取文件名信息
     filename=\$(basename ${consensus_file})
@@ -301,7 +327,7 @@ process ENHANCED_CONSENSUS {
         # 2. 如果相似性>95%，调用分子进化树构建流程
         # 3. 使用IQ-TREE构建系统发育树和祖先序列重建
         # 4. 寻找optimal node并生成一致性序列
-        # 5. 重复直到所有序列相似性<=95%
+        # 5. 重复直到所有序列相似性<=95%；不再进行额外贪心去冗余删除
         python3 ${workflow.projectDir}/scripts/enhanced_consensus_with_validation.py \\
             --input_file ${consensus_file} \\
             --output_file final_consensus_\${basename}.fasta \\
@@ -310,14 +336,15 @@ process ENHANCED_CONSENSUS {
             --threads ${task.cpus}
     fi
 
-    # 最终代表序列不保留由比对产生的两端N或gap；内部位点保持不变。
+    # 最终代表序列不保留由比对产生的gap；低覆盖插入列已在MAFFT后用同一mask删除。
     python3 ${workflow.projectDir}/scripts/trim_sequence_ends.py \\
         --input final_consensus_\${basename}.fasta \\
-        --output final_consensus_\${basename}.fasta
+        --output final_consensus_\${basename}.fasta \\
+        --remove-gaps
     """
 }
 
-// ==================== PROCESS 7: Collect All Results ====================
+// ==================== PROCESS 8: Collect All Results ====================
 process COLLECT_RESULTS {
     tag "Collect All Results"
     publishDir "${params.output_dir}/07_final_results", mode: 'copy'
@@ -341,15 +368,12 @@ process COLLECT_RESULTS {
         --input_glob "final_consensus_*.fasta" \\
         --output_file all_final_consensus.raw.fasta
 
-    # Remove near-identical representatives that remain across independent clusters.
-    python3 ${workflow.projectDir}/scripts/prune_redundant_consensus.py \\
-        --input all_final_consensus.raw.fasta \\
-        --output all_final_consensus.fasta \\
-        --threshold ${params.internal_similarity_threshold} \\
-        --threads ${task.cpus}
+    # Keep tree-derived representatives. Redundancy is handled by iterative
+    # tree-guided consensus generation, not by greedy pairwise deletion.
+    cp all_final_consensus.raw.fasta all_final_consensus.fasta
     
     # Generate summary
-    echo "Enhanced Norovirus GII Consensus Pipeline - Final Summary" > summary_report.txt
+    echo "Enhanced Norovirus GI/GII Consensus Pipeline - Final Summary" > summary_report.txt
     echo "=========================================================" >> summary_report.txt
     echo "Date: \$(date)" >> summary_report.txt
     echo "Input file: ${params.input_file}" >> summary_report.txt
@@ -361,7 +385,7 @@ process COLLECT_RESULTS {
     """
 }
 
-// ==================== PROCESS 8: Final Validation ====================
+// ==================== PROCESS 9: Final Validation ====================
 process FINAL_VALIDATION {
     tag "Final Validation of All Consensus Sequences"
     publishDir "${params.output_dir}/08_validation", mode: 'copy'
@@ -384,7 +408,8 @@ process FINAL_VALIDATION {
     python3 ${workflow.projectDir}/scripts/validate_consensus_internal.py \\
         --consensus_file all_final_consensus.fasta \\
         --output_report final_validation_report.txt \\
-        --similarity_threshold ${params.internal_similarity_threshold}
+        --similarity_threshold ${params.internal_similarity_threshold} \\
+        --group_by genotype_pair
     
     echo "Final validation completed"
     """
@@ -397,8 +422,11 @@ workflow {
     CLUSTER(MERGE_FASTA.out[0])
     SPLIT_CLUSTERS(CLUSTER.out[0], CLUSTER.out[1])
     
+    // 在比对前统一序列方向：反向互补链存储的序列会被校正到与 cluster 多数一致的链上
+    oriented_ch = SPLIT_CLUSTERS.out.flatten() | ORIENT_SEQUENCES
+
     // 初始比对和一致性序列生成
-    initial_align_ch = SPLIT_CLUSTERS.out.flatten() | ALIGN
+    initial_align_ch = oriented_ch | ALIGN
     initial_consensus_ch = initial_align_ch | CONSENSUS
     
     // 对process 5的输出进行增强一致性序列生成和验证

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import logging
 import re
+import shutil
 from collections import defaultdict, Counter
 from Bio import SeqIO, AlignIO, Phylo
 from Bio.Align import AlignInfo
@@ -25,13 +26,10 @@ import numpy as np
 import multiprocessing as mp
 from functools import partial
 
-try:
-    from scripts.prune_redundant_consensus import prune_records
-except ModuleNotFoundError:
-    from prune_redundant_consensus import prune_records
-
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+VALID_BASES = set("ACGT")
 
 
 def make_record_ids_unique(records):
@@ -62,7 +60,7 @@ def normalize_fasta_ids(fasta_file):
 def calculate_sequence_similarity(seq1, seq2):
     """
     计算两条序列的相似性百分比
-    使用方案2：只有当两个位置都不是gap时才计算
+    只有当两个位置都为 A/C/G/T 时才计入分母；N 和 gap 均不作为有效覆盖。
     
     Args:
         seq1 (str): 第一条序列
@@ -74,17 +72,14 @@ def calculate_sequence_similarity(seq1, seq2):
     if len(seq1) != len(seq2):
         raise ValueError("序列长度不匹配")
     
-    # 计算匹配的碱基数（方案2：只有当两个位置都不是gap时才计算）
     matches = 0
     total_positions = 0
     
-    for i in range(len(seq1)):
-        # 只有当两个位置都不是gap时才计算
-        if seq1[i] == '-' or seq2[i] == '-':
+    for base1, base2 in zip(seq1.upper(), seq2.upper()):
+        if base1 not in VALID_BASES or base2 not in VALID_BASES:
             continue
-        
         total_positions += 1
-        if seq1[i].upper() == seq2[i].upper():
+        if base1 == base2:
             matches += 1
     
     if total_positions == 0:
@@ -325,8 +320,15 @@ def parse_tip_sequences(aligned_file):
 
 
 def extract_norovirus_genotype(text):
-    """Extract a GI.x or GII.x genotype label from a filename or sequence ID."""
-    match = re.search(r'(?<![A-Z0-9])G(?:II|I)\.\d+(?!\d)', str(text))
+    """Extract a combined RdRp_VP1 label, or fall back to one genotype label."""
+    pair_match = re.search(
+        r"(G(?:I|II|IX)\.P[A-Za-z0-9]+)_(G(?:I|II|IX)\.[A-Za-z0-9]+)",
+        str(text),
+    )
+    if pair_match:
+        return f"{pair_match.group(1)}_{pair_match.group(2)}"
+
+    match = re.search(r'(?<![A-Z0-9])G(?:I|II|IX)\.P?[A-Za-z0-9]+(?![A-Za-z0-9])', str(text))
     return match.group() if match else None
 
 
@@ -492,8 +494,8 @@ def generate_simple_consensus_from_sequences(sequences):
         bases = []
         for seq in sequences:
             if pos < len(seq):
-                base = seq[pos]
-                if base != '-':  # 排除gap
+                base = seq[pos].upper()
+                if base in VALID_BASES:
                     bases.append(base)
         
         if not bases:
@@ -505,6 +507,208 @@ def generate_simple_consensus_from_sequences(sequences):
             consensus += most_common_base
     
     return consensus
+
+
+def generate_majority_consensus_from_aligned_sequences(sequences):
+    """Generate a majority consensus without choosing one record as the winner."""
+    if not sequences:
+        return ""
+
+    seq_length = max(len(sequence) for sequence in sequences)
+    consensus = []
+    for pos in range(seq_length):
+        bases = []
+        for sequence in sequences:
+            if pos < len(sequence):
+                base = sequence[pos].upper()
+                if base in VALID_BASES:
+                    bases.append(base)
+        if not bases:
+            consensus.append("-")
+        else:
+            consensus.append(Counter(bases).most_common(1)[0][0])
+    return "".join(consensus)
+
+
+def align_records_for_similarity(records, threads=1):
+    """Return aligned sequence strings in input order for similarity comparisons."""
+    if len(records) <= 1:
+        return [str(record.seq).upper() for record in records], "not needed"
+
+    lengths = {len(record.seq) for record in records}
+    if len(lengths) == 1:
+        return [str(record.seq).upper() for record in records], "existing"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = os.path.join(temp_dir, "input.fasta")
+        output_path = os.path.join(temp_dir, "aligned.fasta")
+        SeqIO.write(records, input_path, "fasta")
+
+        with open(output_path, "w") as output_handle:
+            result = subprocess.run(
+                ["mafft", "--quiet", "--auto", "--thread", str(threads), input_path],
+                stdout=output_handle,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"MAFFT failed while aligning consensus records: {result.stderr[:500]}"
+            )
+
+        aligned_records = list(SeqIO.parse(output_path, "fasta"))
+        aligned_by_id = {record.id: str(record.seq).upper() for record in aligned_records}
+        missing = [record.id for record in records if record.id not in aligned_by_id]
+        if missing:
+            raise RuntimeError(f"MAFFT dropped sequence IDs: {missing[:5]}")
+        return [aligned_by_id[record.id] for record in records], "MAFFT"
+
+
+def write_aligned_records(records, aligned_sequences, output_path):
+    """Write aligned sequences using the original record IDs."""
+    aligned_records = []
+    for record, sequence in zip(records, aligned_sequences):
+        aligned_records.append(SeqRecord(Seq(sequence), id=record.id, description=""))
+    SeqIO.write(aligned_records, output_path, "fasta")
+
+
+def parse_cluster_number_from_id(sequence_id):
+    match = re.search(r"cluster[_-]([0-9]+)", sequence_id)
+    return match.group(1) if match else None
+
+
+def merge_consensus_id(records, iteration, merge_index):
+    """Build a stable ID for a merged consensus representative."""
+    cluster_numbers = [
+        parse_cluster_number_from_id(record.id)
+        for record in records
+        if parse_cluster_number_from_id(record.id)
+    ]
+    cluster_number = Counter(cluster_numbers).most_common(1)[0][0] if cluster_numbers else "NA"
+
+    first_id = records[0].id
+    prefix_match = re.match(r"(.+?)_cluster[_-][0-9]+", first_id)
+    if prefix_match:
+        prefix = prefix_match.group(1)
+    else:
+        labels = [extract_norovirus_genotype(record.id) for record in records]
+        labels = [label for label in labels if label]
+        prefix = Counter(labels).most_common(1)[0][0] if labels else "unknown"
+
+    return f"{prefix}_cluster_{cluster_number}_enhanced{iteration}_merge_{merge_index}"
+
+
+def find_high_similarity_pairs(aligned_sequences, threshold):
+    """Return pairs whose pairwise similarity remains at or above threshold."""
+    pairs = []
+    for i in range(len(aligned_sequences)):
+        for j in range(i + 1, len(aligned_sequences)):
+            similarity = calculate_sequence_similarity(aligned_sequences[i], aligned_sequences[j])
+            if similarity >= threshold:
+                pairs.append((similarity, i, j))
+    return pairs
+
+
+def tree_distances_for_pairs(records, aligned_sequences, pairs, threads):
+    """Estimate tree distances for high-similarity pairs; fall back to zero on failure."""
+    if not pairs:
+        return {}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        aligned_path = os.path.join(temp_dir, "merge_candidates.aligned.fasta")
+        prefix = os.path.join(temp_dir, "merge_tree")
+        write_aligned_records(records, aligned_sequences, aligned_path)
+        try:
+            tree_file, _ = run_iqtree_enhanced(aligned_path, prefix, threads, fast_mode=True)
+            tree = Phylo.read(tree_file, "newick")
+            distances = {}
+            for _, i, j in pairs:
+                try:
+                    distances[(i, j)] = tree.distance(records[i].id, records[j].id)
+                except Exception:
+                    distances[(i, j)] = 0.0
+            return distances
+        except Exception as exc:
+            logging.warning(f"树引导相似consensus合并建树失败，回退到相似性排序: {exc}")
+            return {(i, j): 0.0 for _, i, j in pairs}
+
+
+def tree_guided_merge_similar_consensus(fasta_file, threshold=95.0, threads=1, iteration=1):
+    """
+    Merge highly similar consensus representatives instead of deleting one.
+
+    The previous pruning step removed later records greedily. This routine keeps
+    all information by replacing each selected high-similarity pair with a newly
+    rebuilt majority consensus. Pairs are prioritized by sequence similarity and,
+    when possible, by short patristic distance in a consensus-only tree.
+    """
+    records = make_record_ids_unique(list(SeqIO.parse(fasta_file, "fasta")))
+    if len(records) <= 1:
+        return 0
+
+    aligned_sequences, alignment_method = align_records_for_similarity(records, threads)
+    pairs = find_high_similarity_pairs(aligned_sequences, threshold)
+    if not pairs:
+        logging.info("树引导合并检查: 未发现高于阈值的consensus相似对")
+        return 0
+
+    tree_distances = tree_distances_for_pairs(records, aligned_sequences, pairs, threads)
+    pairs.sort(key=lambda item: (-item[0], tree_distances.get((item[1], item[2]), 0.0)))
+
+    used = set()
+    merge_pairs = []
+    for similarity, i, j in pairs:
+        if i in used or j in used:
+            continue
+        merge_pairs.append((similarity, i, j))
+        used.add(i)
+        used.add(j)
+
+    if not merge_pairs:
+        return 0
+
+    merged_records = []
+    merge_lookup = {}
+    for merge_index, (similarity, i, j) in enumerate(merge_pairs, start=1):
+        merge_id = merge_consensus_id([records[i], records[j]], iteration, merge_index)
+        sequence = generate_majority_consensus_from_aligned_sequences(
+            [aligned_sequences[i], aligned_sequences[j]]
+        )
+        merged_records.append(SeqRecord(Seq(sequence), id=merge_id, description=""))
+        merge_lookup[i] = merge_id
+        merge_lookup[j] = merge_id
+        logging.info(
+            "树引导合并相似consensus: %s + %s -> %s (similarity %.2f%%, tree distance %.6f)",
+            records[i].id,
+            records[j].id,
+            merge_id,
+            similarity,
+            tree_distances.get((i, j), 0.0),
+        )
+
+    output_records = []
+    emitted_merges = set()
+    for index, record in enumerate(records):
+        if index in merge_lookup:
+            merge_id = merge_lookup[index]
+            if merge_id not in emitted_merges:
+                output_records.append(next(record for record in merged_records if record.id == merge_id))
+                emitted_merges.add(merge_id)
+        else:
+            output_records.append(record)
+
+    temp_file = f"{fasta_file}.tree_merge.tmp"
+    SeqIO.write(make_record_ids_unique(output_records), temp_file, "fasta")
+    shutil.move(temp_file, fasta_file)
+    logging.info(
+        "树引导合并完成: %d 条输入代表序列 -> %d 条输出代表序列；合并 %d 对；比对方法: %s",
+        len(records),
+        len(output_records),
+        len(merge_pairs),
+        alignment_method,
+    )
+    return len(merge_pairs)
 
 def generate_enhanced_consensus_with_node_analysis(aligned_file, consensus_file, iteration, similarity_threshold=95.0, threads=8):
     """
@@ -840,14 +1044,14 @@ def main():
             # 步骤1: 计算当前文件的pairwise相似性
             max_similarity = calculate_maximum_pairwise_similarity(current_input)
             
-            logging.info(f"当前最高相似性: {max_similarity:.2f}%")
+            logging.info(f"当前最高相似性: {max_similarity:.4f}%")
             
             # 步骤2: 检查是否需要继续enhanced consensus
-            if max_similarity <= args.similarity_threshold:
-                logging.info(f"相似性 {max_similarity:.2f}% <= {args.similarity_threshold}%，满足条件，停止迭代")
+            if max_similarity < args.similarity_threshold:
+                logging.info(f"相似性 {max_similarity:.4f}% < {args.similarity_threshold}%，满足条件，停止迭代")
                 break
             
-            logging.info(f"相似性 {max_similarity:.2f}% > {args.similarity_threshold}%，需要继续enhanced consensus")
+            logging.info(f"相似性 {max_similarity:.4f}% >= {args.similarity_threshold}%，需要继续enhanced consensus")
             
             # 步骤3: 运行generate_consensus.py的流程生成consensus序列
             current_output = os.path.join(
@@ -864,20 +1068,20 @@ def main():
                     current_iteration # 传递当前迭代次数
                 )
                 normalize_fasta_ids(current_output)
-                output_records = list(SeqIO.parse(current_output, "fasta"))
-                retained_records, _ = prune_records(
-                    output_records,
+                logging.info(f"第{current_iteration}轮generate_consensus.py流程完成，输出文件: {current_output}")
+                merged_pair_count = tree_guided_merge_similar_consensus(
+                    current_output,
                     threshold=args.similarity_threshold,
                     threads=args.threads,
+                    iteration=current_iteration,
                 )
-                if len(retained_records) < len(output_records):
-                    SeqIO.write(retained_records, current_output, "fasta")
+                if merged_pair_count:
+                    normalize_fasta_ids(current_output)
                     logging.info(
-                        "第%d轮去除 %d 条相似性高于阈值的冗余代表序列",
+                        "第%d轮树引导合并了 %d 对高相似consensus代表序列",
                         current_iteration,
-                        len(output_records) - len(retained_records),
+                        merged_pair_count,
                     )
-                logging.info(f"第{current_iteration}轮generate_consensus.py流程完成，输出文件: {current_output}")
                 
                 # 检查输出文件是否存在
                 if not os.path.exists(current_output):
