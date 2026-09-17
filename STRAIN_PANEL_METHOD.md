@@ -5,7 +5,7 @@
 **互相之间可被 150 bp 污水读段区分**（支持区分基因组相似性 ≥99% 的不同毒株）的参考 panel。
 
 - 上游 Nextflow 流程：`mapping_reference.nf`（分组/比对/建树）
-- 核心选择脚本：`scripts/build_mapping_reference_group.py`（v2.0，本文档主角）
+- 核心选择脚本：`scripts/mapping_reference/build_mapping_reference_group.py`（v2.0，本文档主角）
 - 英文姊妹实现（standalone、任意病毒可用）：见 `generate_representative_references.py` 所在
   仓库 [viral-representative-references](https://github.com/JingLu-GDIPH/viral-representative-references)
 
@@ -32,19 +32,19 @@
 
 ①–⑤、⑦ 由 `mapping_reference.nf` 编排；⑥ 为 `build_mapping_reference_group.py`（本配方）。
 
-### ① 质量过滤（filter_n_sequences.py）
+### ① 质量过滤（scripts/common/filter_n_sequences.py）
 `(N数+gap数)/长度 > 10%` 移除。
 
-### ② 按 RdRp+VP1 精确分组（group_sequences_by_rdrp_vp1.py）
+### ② 按 RdRp+VP1 精确分组（scripts/common/group_sequences_by_rdrp_vp1.py）
 ID 前两字段正则精确匹配 `G(I|II|IX)\.P*`，组号 `cluster_NNNN`。
 
-### ③ 拆组（split_clusters.py）
+### ③ 拆组（scripts/common/split_clusters.py）
 每组一个 FASTA，文件名 `cluster__cluster_NNNN__<RdRp>_<VP1>.fasta`。
 
 ### ④ 方向归一 + 比对 + 列过滤
 - `normalize_orientation.py`：15-mer / 最小重叠 50 / 参考取 A/C/G/T 最多者，反向链校正；
 - `mafft --quiet --auto`（去既有 gap 后重比对）；
-- `trim_alignment_ends.py --min-coverage 0.5`：**所有列**（端部+内部）A/C/G/T 覆盖 <50% 即删，
+- `scripts/common/trim_alignment_ends.py --min-coverage 0.5`：**所有列**（端部+内部）A/C/G/T 覆盖 <50% 即删，
   N/gap 不计覆盖。
 
 ### ⑤ IQ-TREE（≥4 条/组）
@@ -56,7 +56,7 @@ iqtree3 -s aligned.fasta -m GTR+F+R4 --alrt 1000 -B 1000 --bnni \
 
 ### ⑥ 核心：株级选择与迭代验证（定案命令）
 ```bash
-python3 scripts/build_mapping_reference_group.py \
+python3 scripts/mapping_reference/build_mapping_reference_group.py \
   --alignment aligned.fasta \
   --tree iqtree/iqtree.treefile --state iqtree/iqtree.state --mldist iqtree/iqtree.mldist \
   --outdir mapping_ref_<组> --bowtie2 <bowtie2> --threads 4 \
@@ -181,9 +181,7 @@ dist < 0.5 其余                                   → merge   （参考互抢�
 
 ## 6. 复现资产
 
-- `test_vp1_veto_golden.py`：VP1 否决金标准回归（8 对相邻 GII.4 变异株 + 近重复对照 + 部分基因组模拟）
-- `derive_params_forward.py`：结果导向参数推导实验（浓缩系数 / R99 / 混株还原模拟）
-- `gii4_threshold_calibration.py` / `gii17_threshold_calibration*.py`：T 阈值校准
-- `analyze_gii4_variant_match.py` / `check_variant_resolution.py`：panel vs 命名变异株对照
-- `calibrate_max_and_target.py` / `calibrate_dist_rate_segments.py` / `compare_rulesets.py`：参数依据实验
-- `result_paper/`：阈值校准三面板出版图（Fig_threshold_calibration）
+阈值校准与验证分析脚本（test_vp1_veto_golden.py、derive_params_forward.py、
+gii4/gii17_threshold_calibration.py、analyze_gii4_variant_match.py 等）及出版图
+（result_paper/Fig_threshold_calibration）在 2026-09-15 仓库清理中移出工作树，
+完整内容见 git 历史（v2.0.0 提交）。

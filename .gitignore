@@ -31,3 +31,4 @@ v2_test/
 *.docx
 *.pdf
 nohup.out
+result_paper/

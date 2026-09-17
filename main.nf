@@ -96,7 +96,7 @@ process MERGE_FASTA {
     
     # 过滤掉N碱基和gap比例超过10%的序列
     echo "Filtering sequences with N content and gaps > 10%..."
-    python3 ${workflow.projectDir}/scripts/filter_n_sequences.py \\
+    python3 ${workflow.projectDir}/scripts/common/filter_n_sequences.py \\
         --input_file input_copy.fasta \\
         --output_file merged_sequences.fasta \\
         --threshold 10.0 > filter_report.txt 2>&1
@@ -121,7 +121,7 @@ process CLUSTER {
     script:
     """
     echo "按相同RdRp genotype和VP1 genotype直接分组，避免ANI覆盖度/长度差异造成初始cluster偏差..."
-    python3 ${workflow.projectDir}/scripts/group_sequences_by_rdrp_vp1.py \\
+    python3 ${workflow.projectDir}/scripts/common/group_sequences_by_rdrp_vp1.py \\
         --input ${merged_fasta} \\
         --cluster_info cluster_info.csv \\
         --sequences_output clustered_sequences.fasta \\
@@ -143,7 +143,7 @@ process SPLIT_CLUSTERS {
 
     script:
     """
-    python3 ${workflow.projectDir}/scripts/split_clusters.py \
+    python3 ${workflow.projectDir}/scripts/common/split_clusters.py \
         --cluster_info ${cluster_info} \
         --sequences ${clustered_sequences} \
         --outdir clusters
@@ -169,7 +169,7 @@ process ORIENT_SEQUENCES {
     # 会被强行对齐到错误方向，产生大量 gap 和错误的相似性（例如 GII.P31_GII.4_KX158285）。
     # 这里以每个 cluster 内最长序列作为方向参考，对反向存储的序列做反向互补后再比对。
     # 输出仍命名为 oriented_<原名>，方便排查；后续 CONSENSUS 会去掉 oriented_ 前缀再解析基因型。
-    python3 ${workflow.projectDir}/scripts/normalize_orientation.py \\
+    python3 ${workflow.projectDir}/scripts/common/normalize_orientation.py \\
         --input ${cluster_fasta} \\
         --output oriented_\${output_name}
     """
@@ -208,7 +208,7 @@ process ALIGN {
 
     # 删除所有A/C/G/T覆盖率低于阈值的列。
     # N和gap不计为有效覆盖，内部低覆盖插入列不进入建树和consensus。
-    python3 ${workflow.projectDir}/scripts/trim_alignment_ends.py \\
+    python3 ${workflow.projectDir}/scripts/common/trim_alignment_ends.py \\
         --input pretrim_\${output_name} \\
         --output aligned_\${output_name} \\
         --min-coverage ${params.alignment_end_min_coverage}
@@ -284,7 +284,7 @@ process CONSENSUS {
         # 2. 进行midpoint rooting和节点编号分配
         # 3. 寻找optimal node（满足相似性阈值的节点）
         # 4. 基于optimal node生成一致性序列
-        python3 ${workflow.projectDir}/scripts/generate_consensus.py \\
+        python3 ${workflow.projectDir}/scripts/probe_consensus/generate_consensus.py \\
             --aligned_fasta ${aligned_fasta} \\
             --consensus_output \$consensus_file \\
             --similarity_threshold ${params.similarity_threshold} \\
@@ -328,7 +328,7 @@ process ENHANCED_CONSENSUS {
         # 3. 使用IQ-TREE构建系统发育树和祖先序列重建
         # 4. 寻找optimal node并生成一致性序列
         # 5. 重复直到所有序列相似性<=95%；不再进行额外贪心去冗余删除
-        python3 ${workflow.projectDir}/scripts/enhanced_consensus_with_validation.py \\
+        python3 ${workflow.projectDir}/scripts/probe_consensus/enhanced_consensus_with_validation.py \\
             --input_file ${consensus_file} \\
             --output_file final_consensus_\${basename}.fasta \\
             --similarity_threshold ${params.internal_similarity_threshold} \\
@@ -337,7 +337,7 @@ process ENHANCED_CONSENSUS {
     fi
 
     # 最终代表序列不保留由比对产生的gap；低覆盖插入列已在MAFFT后用同一mask删除。
-    python3 ${workflow.projectDir}/scripts/trim_sequence_ends.py \\
+    python3 ${workflow.projectDir}/scripts/probe_consensus/trim_sequence_ends.py \\
         --input final_consensus_\${basename}.fasta \\
         --output final_consensus_\${basename}.fasta \\
         --remove-gaps
@@ -364,7 +364,7 @@ process COLLECT_RESULTS {
     echo "Collecting all final consensus sequences..."
     
     # Combine all consensus files and keep FASTA identifiers globally unique.
-    python3 ${workflow.projectDir}/scripts/combine_consensus_fastas.py \\
+    python3 ${workflow.projectDir}/scripts/probe_consensus/combine_consensus_fastas.py \\
         --input_glob "final_consensus_*.fasta" \\
         --output_file all_final_consensus.raw.fasta
 
@@ -405,7 +405,7 @@ process FINAL_VALIDATION {
     echo "Equal-length alignments will be validated directly."
     
     # Run final validation
-    python3 ${workflow.projectDir}/scripts/validate_consensus_internal.py \\
+    python3 ${workflow.projectDir}/scripts/probe_consensus/validate_consensus_internal.py \\
         --consensus_file all_final_consensus.fasta \\
         --output_report final_validation_report.txt \\
         --similarity_threshold ${params.internal_similarity_threshold} \\

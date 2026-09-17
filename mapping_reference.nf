@@ -59,7 +59,7 @@ process FILTER_INPUT {
 
     script:
     """
-    python3 ${workflow.projectDir}/scripts/filter_n_sequences.py \
+    python3 ${workflow.projectDir}/scripts/common/filter_n_sequences.py \
       --input_file ${input_fasta} \
       --output_file filtered_input.fasta \
       --threshold ${params.max_n_gap_percent} > filter_report.txt 2>&1
@@ -81,7 +81,7 @@ process GROUP_BY_GENOTYPE {
 
     script:
     """
-    python3 ${workflow.projectDir}/scripts/group_sequences_by_rdrp_vp1.py \
+    python3 ${workflow.projectDir}/scripts/common/group_sequences_by_rdrp_vp1.py \
       --input ${filtered_fasta} \
       --cluster_info cluster_info.csv \
       --sequences_output grouped_sequences.fasta \
@@ -103,7 +103,7 @@ process SPLIT_GROUPS {
 
     script:
     """
-    python3 ${workflow.projectDir}/scripts/split_clusters.py \
+    python3 ${workflow.projectDir}/scripts/common/split_clusters.py \
       --cluster_info ${cluster_info} \
       --sequences ${grouped_fasta} \
       --outdir clusters
@@ -126,7 +126,7 @@ process ORIENT_AND_ALIGN {
 
     script:
     """
-    python3 ${workflow.projectDir}/scripts/normalize_orientation.py \
+    python3 ${workflow.projectDir}/scripts/common/normalize_orientation.py \
       --input ${group_fasta} \
       --output oriented_${group_fasta.name}
 
@@ -138,7 +138,7 @@ process ORIENT_AND_ALIGN {
       mafft --quiet --auto --thread ${task.cpus} ungapped_${group_fasta.name} > pretrim_${group_fasta.name}
     fi
 
-    python3 ${workflow.projectDir}/scripts/trim_alignment_ends.py \
+    python3 ${workflow.projectDir}/scripts/common/trim_alignment_ends.py \
       --input pretrim_${group_fasta.name} \
       --output aligned_${group_fasta.name} \
       --min-coverage ${params.alignment_min_coverage}
@@ -203,7 +203,7 @@ process SELECT_MAPPING_REFERENCES {
       tree_args="--tree ${iqtree_dir}/iqtree.treefile --state ${iqtree_dir}/iqtree.state --mldist ${iqtree_dir}/iqtree.mldist"
     fi
 
-    python3 ${workflow.projectDir}/scripts/build_mapping_reference_group.py \
+    python3 ${workflow.projectDir}/scripts/mapping_reference/build_mapping_reference_group.py \
       --alignment ${aligned_fasta} \
       \$tree_args \
       --outdir mapping_ref_${group_key} \
@@ -244,7 +244,7 @@ process COLLECT_MAPPING_REFERENCES {
 
     script:
     """
-    python3 ${workflow.projectDir}/scripts/collect_mapping_references.py \
+    python3 ${workflow.projectDir}/scripts/mapping_reference/collect_mapping_references.py \
       --input-glob 'mapping_ref_*/final_mapping_references.fasta' \
       --output all_mapping_references.fasta \
       --report final_sequence_qc.tsv \

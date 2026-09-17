@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.1.0 (2026-09-15)
+
+### Repository cleanup — two production pipelines only
+- Scripts reorganized into `scripts/common/` (shared), `scripts/probe_consensus/`
+  (pipeline 1), and `scripts/mapping_reference/` (pipeline 2); `main.nf` and
+  `mapping_reference.nf` path references updated.
+- Removed data-preparation chain (NCBI download/norotyping/renaming), one-off
+  calibration & validation scripts, plotting/QC extras, `tests/`, and stale docs
+  (METHODS_AND_PIPELINE.md, MAPPING_REFERENCE_README.md, SCRIPT_VERSIONS.md).
+  All recoverable from git history (v2.0.0 commit).
+- README rewritten for the cleaned layout; STRAIN_PANEL_METHOD.md paths updated.
+- `result_paper/` untracked (kept locally; embedded in the analysis docx).
+
+
 ## v2.0.0 (2026-09-15)
 
 ### Strain-level medoid panel (final recipe)
