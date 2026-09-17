@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.1 (2026-09-15)
+
+- Renamed `main.nf` -> `main_probe.nf` for clarity (probe-consensus pipeline);
+  run with `nextflow run main_probe.nf ...`. Docs and config comments updated.
+
+
 ## v2.1.0 (2026-09-15)
 
 ### Repository cleanup — two production pipelines only

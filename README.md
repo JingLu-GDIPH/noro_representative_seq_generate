@@ -7,13 +7,13 @@
 
 | 流程 | 入口 | 用途 |
 |---|---|---|
-| **流程一 · 探针共识** | `main.nf` | 95% 相似性边界节点的共识/祖先代表序列，用于 tiling 探针设计 |
+| **流程一 · 探针共识** | `main_probe.nf` | 95% 相似性边界节点的共识/祖先代表序列，用于 tiling 探针设计 |
 | **流程二 · 映射参考（株级 medoid 定案 v2.0）** | `mapping_reference.nf` + `scripts/mapping_reference/build_mapping_reference_group.py` | 150 bp 污水读段比对参考：全部真实序列（medoid），支持 ≥99% 基因组相似毒株共存 |
 
 ## 目录结构
 
 ```text
-main.nf / nextflow.config            流程一（探针共识）
+main_probe.nf / nextflow.config      流程一（探针共识）
 mapping_reference.nf / mapping_reference.config   流程二（株级 medoid 映射参考）
 environment.yml                      conda 环境（noro-consensus）
 scripts/common/                      两流程共用（过滤/分组/拆组/方向归一/列过滤）
@@ -24,11 +24,11 @@ STRAIN_PANEL_METHOD.md               流程二 v2.0 完整方法与参数依据
 CHANGELOG.md / VERSION               版本记录
 ```
 
-## 流程一 · 探针共识（main.nf）
+## 流程一 · 探针共识（main_probe.nf）
 
 ```bash
 conda activate noro-consensus
-nextflow run main.nf --input_file <gii.fasta> --output_dir <dir> --threads 8
+nextflow run main_probe.nf --input_file <gii.fasta> --output_dir <dir> --threads 8
 # 关键参数: similarity 95%、内部相似性 95%、列覆盖 0.5、迭代 10
 ```
 

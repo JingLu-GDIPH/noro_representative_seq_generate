@@ -102,7 +102,7 @@ children.push(new Paragraph({
 const coverInfo = table(
   ["项目", "说明"],
   [
-    ["流程代码版本", "main.nf v1.4.0；mapping_reference.nf + build_mapping_reference_group.py v2.0.0（株级 medoid 定案配方）"],
+    ["流程代码版本", "main_probe.nf v1.4.0；mapping_reference.nf + build_mapping_reference_group.py v2.0.0（株级 medoid 定案配方）"],
     ["文档生成日期", "2026-09-15"],
     ["工作目录", "noro_representative_seq_generate/"],
     ["运行环境", "conda 环境 noro-consensus（Python 3.8+、Biopython、MAFFT、IQ-TREE / IQ-TREE 3、Bowtie2、FastTree）"],
@@ -126,7 +126,7 @@ children.push(h2("1.2  两条流程的定位与关系"));
 children.push(table(
   ["流程", "入口文件", "代表性序列定义", "目标下游应用", "结果目录"],
   [
-    ["流程一 · 探针共识流程", "main.nf (v1.4.0)", "95% 相似性边界节点对应的祖先/共识序列", "tiling 探针设计、分子流行病学参考集", "results_4probe/"],
+    ["流程一 · 探针共识流程", "main_probe.nf (v1.4.0)", "95% 相似性边界节点对应的祖先/共识序列", "tiling 探针设计、分子流行病学参考集", "results_4probe/"],
     ["流程二 · 映射参考流程（株级 medoid 定案）", "mapping_reference.nf + build_mapping_reference_group.py v2.0", "全部由真实存在序列（medoid）组成，支持 ≥99% 基因组相似毒株共存，经 150 bp 读段可区分性验证", "150 bp 污水测序读段的竞争性比对参考", "result_4ref/"],
   ],
   [1900, 1700, 2300, 2060, 1400]
@@ -260,7 +260,7 @@ children.push(pageBreak());
 // ====================================================================
 // 4. Pipeline 1
 // ====================================================================
-children.push(h1("4  流程一：探针代表性共识序列生成（main.nf v1.4.0）"));
+children.push(h1("4  流程一：探针代表性共识序列生成（main_probe.nf v1.4.0）"));
 children.push(para("本流程以“95% 成对相似性”为多样性边界，输出用于探针设计与流行病学参考的代表序列。包含 9 个 Nextflow process。"));
 
 children.push(h2("4.1  流程步骤总览"));
